@@ -186,6 +186,14 @@
  /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiUdp.h \
  /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/cores/esp32/Udp.h \
  /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/cores/esp32/cbuf.h \
+ /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiClient.h \
+ /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/WebServer.h \
+ /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/HTTP_Method.h \
+ /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32c3/include/nghttp/port/include/http_parser.h \
+ /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/Uri.h \
+ /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/libraries/WebServer/src/detail/RequestHandler.h \
+ /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/libraries/DNSServer/src/DNSServer.h \
+ /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/WiFiUdp.h \
  .pio/libdeps/esp32-c3-devkitm-1/Arduino_ESP32_OTA/src/Arduino_ESP32_OTA.h \
  .pio/libdeps/esp32-c3-devkitm-1/Arduino_DebugUtils/src/Arduino_DebugUtils.h \
  /Users/jorgelserve/.platformio/packages/framework-arduinoespressif32/libraries/WiFiClientSecure/src/WiFiClientSecure.h \
@@ -234,5 +242,4 @@
  .pio/libdeps/esp32-c3-devkitm-1/ArduinoHttpClient/src/utility/URLParser/http_parser.h \
  .pio/libdeps/esp32-c3-devkitm-1/ArduinoJson/src/ArduinoJson.h \
  .pio/libdeps/esp32-c3-devkitm-1/ArduinoJson/src/ArduinoJson.hpp \
- .pio/libdeps/esp32-c3-devkitm-1/ArduinoJson/src/ArduinoJson/Configuration.hpp \
- src/config.h
+ .pio/libdeps/esp32-c3-devkitm-1/ArduinoJson/src/ArduinoJson/Configuration.hpp

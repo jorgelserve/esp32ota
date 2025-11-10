@@ -26,21 +26,35 @@ This project demonstrates an ESP32-based system with an SSD1306 OLED display and
 
 ## Configuration
 
-Before uploading the firmware, you need to configure the following in `src/main.cpp`:
+This project uses a secure configuration approach that does not require hardcoding WiFi credentials:
 
-1. WiFi credentials:
-   ```cpp
-   const char* ssid = "YOUR_WIFI_SSID";
-   const char* password = "YOUR_WIFI_PASSWORD";
-   ```
+1. On first run (or when no saved credentials exist), the ESP32 will create an access point named "ESP32-OTA-Setup"
+2. Connect to this AP from your phone/computer
+3. Open a web browser and navigate to any address (e.g., 192.168.4.1)
+4. Enter your WiFi credentials in the web interface
+5. The device will save the credentials and attempt to connect
+6. After successful connection, the device will operate normally
 
-2. GitHub repository settings (already configured in config.h for this repo):
-   ```cpp
-   const char* githubUser = "jorgelserve";
-   const char* githubRepo = "esp32ota";
-   const char* githubRelease = "latest"; // or specific release tag like "v1.0.0"
-   const char* githubFile = "firmware.bin"; // Your firmware binary name
-   ```
+Alternatively, you can enter AP mode at any time by pressing and holding the onboard button for 5 seconds.
+
+GitHub repository settings are configured in `src/config.h`:
+```cpp
+const char* githubUser = "jorgelserve";
+const char* githubRepo = "esp32ota";
+const char* githubRelease = "latest"; // or specific release tag like "v1.0.0"
+const char* githubFile = "firmware.bin"; // Your firmware binary name
+```
+
+## GitHub Actions Workflow
+
+The project includes a GitHub Actions workflow that:
+
+- Builds the firmware automatically on pushes to main/develop branches and on pull requests
+- Creates GitHub releases and uploads firmware assets only on pushes to the main branch from the original repository
+- Skips release steps when running from forks or pull requests to avoid permission issues
+- Requires proper permissions to create releases (not available from forks or PRs)
+
+To enable automatic release creation, ensure the workflow is triggered by a direct push to the main branch in the original repository, not from a fork.
 
 ## How OTA Updates Work
 

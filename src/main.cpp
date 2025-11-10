@@ -1,29 +1,70 @@
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
+#include <DNSServer.h>
 #include <Arduino_ESP32_OTA.h>
 #include <ArduinoJson.h>
-#include "config.h"
 
-// WiFi credentials
-const char* ssid = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
+// Pin definitions
+#define SDA_PIN 5
+#define SCL_PIN 6
+#define BUTTON_PIN 9  // Onboard button for AP mode activation
 
-// GitHub OTA configuration
-const char* githubUser = GITHUB_USER;
-const char* githubRepo = GITHUB_REPO;
-const char* githubRelease = GITHUB_RELEASE; // Use "latest" for latest release or specific tag like "v1.0.0"
-const char* githubFile = GITHUB_FILE;
+// Display configuration
+#define kDisplayFrameIntervalMs 125
+#define kMarqueeGapPx 12
+#define kMarqueeStepMs 45
 
-// Construct the GitHub URL for the binary
-String githubUrl = "https://github.com/" + String(githubUser) + "/" + String(githubRepo) + "/releases/download/" + String(githubRelease) + "/" + String(githubFile);
+// AP configuration
+const char* apSSID = "ESP32-OTA-Setup";
+const char* apPassword = "123456789";  // Default AP password for security
 
-// ********** Display configuration **********
-#define kDisplayFrameIntervalMs 125  // Display refresh interval in ms
-#define kMarqueeGapPx 12  // Gap in pixels for marquee text
-#define kMarqueeStepMs 45  // Marquee animation step in ms
+// Configuration state
+enum ConfigState {
+  CONFIG_MODE,
+  CONNECTING,
+  CONNECTED,
+  OTA_IDLE,
+  OTA_UPDATING
+};
 
-// ********** OLED Display class **********
+// Global variables
+ConfigState currentState = CONFIG_MODE;
+String ssid = "";
+String password = "";
+String githubUser = "jorgelserve";
+String githubRepo = "esp32ota";
+String githubRelease = "latest";
+String githubFile = "firmware.bin";
+String githubUrl = "https://github.com/" + githubUser + "/" + githubRepo + "/releases/download/" + githubRelease + "/" + githubFile;
+
+// Debugging levels
+#define DEBUG_LEVEL_VERBOSE 3
+#define DEBUG_LEVEL_INFO    2
+#define DEBUG_LEVEL_WARN    1
+#define DEBUG_LEVEL_ERROR   0
+#define DEBUG_LEVEL_NONE   -1
+
+int DEBUG_LEVEL = DEBUG_LEVEL_INFO; // Change this to control debugging output
+
+// Debug macros
+#define DEBUG_PRINT(level, msg) if(level <= DEBUG_LEVEL) { Serial.print("["); Serial.print(getLogLevelString(level)); Serial.print("] "); Serial.println(msg); }
+#define DEBUG_PRINTLN(level, msg) if(level <= DEBUG_LEVEL) { Serial.print("["); Serial.print(getLogLevelString(level)); Serial.print("] "); Serial.println(msg); }
+#define DEBUG_PRINTF(level, format, ...) if(level <= DEBUG_LEVEL) { Serial.printf("[%s] " format "\n", getLogLevelString(level), ##__VA_ARGS__); }
+
+const char* getLogLevelString(int level) {
+  switch(level) {
+    case DEBUG_LEVEL_VERBOSE: return "VERBOSE";
+    case DEBUG_LEVEL_INFO: return "INFO";
+    case DEBUG_LEVEL_WARN: return "WARN";
+    case DEBUG_LEVEL_ERROR: return "ERROR";
+    default: return "NONE";
+  }
+}
+
+// OLED Display class
 class OledDisplay {
  private:
   U8G2_SSD1306_72X40_ER_F_HW_I2C u8g2;
@@ -35,6 +76,7 @@ class OledDisplay {
     u8g2.begin();
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_tf);
+    DEBUG_PRINT(DEBUG_LEVEL_INFO, "OLED Display initialized");
   }
 
   void showLines(const String &line1, const String &line2, const String &line3, int16_t line2PrimaryX = 0,
@@ -56,20 +98,13 @@ class OledDisplay {
   }
 
   void beginFrame() { u8g2.clearBuffer(); }
-
   void endFrame() { u8g2.sendBuffer(); }
-
   void drawText(int16_t x, int16_t y, const char *text) { u8g2.drawUTF8(x, y, text); }
-
   void drawText(int16_t x, int16_t y, const String &text) { drawText(x, y, text.c_str()); }
-
   uint16_t textWidth(const char *text) { return u8g2.getUTF8Width(text); }
-
   uint16_t textWidth(const String &text) { return textWidth(text.c_str()); }
-
   uint8_t width() { return u8g2.getDisplayWidth(); }
   
-  // Public methods to access u8g2 drawing functions for more complex drawings
   void drawFrame(int16_t x, int16_t y, uint16_t width, uint16_t height) {
     u8g2.drawFrame(x, y, width, height);
   }
@@ -83,277 +118,397 @@ class OledDisplay {
   }
 };
 
-// ********** Marquee animation helpers **********
-int16_t computeMarqueePrimaryX(const char *text, uint32_t now, uint8_t screenWidth, uint16_t textPixelWidth) {
-  if (textPixelWidth <= screenWidth) {
-    return 0;
+// WiFi Manager class
+class WiFiManager {
+private:
+  bool connected = false;
+  unsigned long connectStartTime = 0;
+  const unsigned long timeout = 30000;  // 30 seconds timeout
+
+public:
+  bool startAPMode() {
+    WiFi.mode(WIFI_AP);
+    bool result = WiFi.softAP(apSSID, apPassword);
+    if (result) {
+      DEBUG_PRINTF(DEBUG_LEVEL_INFO, "AP started: %s, IP: %s", apSSID, WiFi.softAPIP().toString().c_str());
+      connected = true;
+    } else {
+      DEBUG_PRINT(DEBUG_LEVEL_ERROR, "Failed to start AP mode");
+      connected = false;
+    }
+    return result;
   }
-  const uint16_t travel = textPixelWidth + screenWidth + kMarqueeGapPx;
-  const uint32_t step = (now / kMarqueeStepMs) % travel;
-  return static_cast<int16_t>(screenWidth) - static_cast<int16_t>(step);
-}
-
-void drawMarqueeLine(OledDisplay &display, const char *text, int16_t y, uint32_t now) {
-  const uint16_t textPixelWidth = display.textWidth(text);
-  const uint8_t screenWidth = display.width();
-  if (textPixelWidth <= screenWidth) {
-    display.drawText(0, y, text);
-    return;
+  
+  bool connectToNetwork(const String& networkSSID, const String& networkPassword) {
+    if (networkSSID.length() == 0) {
+      DEBUG_PRINT(DEBUG_LEVEL_WARN, "No SSID provided, cannot connect");
+      return false;
+    }
+    
+    DEBUG_PRINTF(DEBUG_LEVEL_INFO, "Attempting to connect to: %s", networkSSID.c_str());
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(networkSSID.c_str(), networkPassword.c_str());
+    
+    connectStartTime = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - connectStartTime < timeout)) {
+      delay(500);
+      DEBUG_PRINT(DEBUG_LEVEL_VERBOSE, ".");
+    }
+    
+    connected = (WiFi.status() == WL_CONNECTED);
+    if (connected) {
+      DEBUG_PRINTF(DEBUG_LEVEL_INFO, "Connected to %s, IP: %s", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+    } else {
+      DEBUG_PRINTF(DEBUG_LEVEL_ERROR, "Failed to connect to %s after %lu ms", networkSSID.c_str(), timeout);
+    }
+    
+    return connected;
   }
-
-  const int16_t primaryX = computeMarqueePrimaryX(text, now, screenWidth, textPixelWidth);
-  display.drawText(primaryX, y, text);
-  display.drawText(primaryX + textPixelWidth + kMarqueeGapPx, y, text);
-}
-
-void drawMarqueeLine(OledDisplay &display, const String &text, int16_t y, uint32_t now) {
-  drawMarqueeLine(display, text.c_str(), y, now);
-}
-
-// Global display instance
-OledDisplay display;
-
-// OTA Update state
-enum OtaState {
-  OTA_IDLE,
-  OTA_CONNECTING,
-  OTA_DOWNLOADING,
-  OTA_UPDATING,
-  OTA_SUCCESS,
-  OTA_FAILED
+  
+  bool isConnected() { return connected; }
+  String getIP() { return WiFi.localIP().toString(); }
+  String getSSID() { return WiFi.SSID(); }
+  wl_status_t getStatus() { return WiFi.status(); }
 };
 
-OtaState otaState = OTA_IDLE;
-String otaStatus = "Ready";
-unsigned long lastOtaCheck = 0;
-const unsigned long otaCheckInterval = 30000; // Check every 30 seconds
+// Web server for configuration
+WebServer server(80);
+DNSServer dnsServer;
+const byte DNS_PORT = 53;
 
-void setup() {
-  Serial.begin(115200);
-  
-  // Initialize display
-  display.begin();
-  display.showLines("ESP32 OLED", "Demo Starting", "Please wait...");
-  
-  // Connect to WiFi
-  WiFi.begin(ssid, password);
-  display.showLines("WiFi Connect", ssid, "Connecting...");
-  
-  int attempt = 0;
-  const int maxAttempts = 20;
-  while (WiFi.status() != WL_CONNECTED && attempt < maxAttempts) {
-    delay(500);
-    Serial.print(".");
-    attempt++;
+// OTA Manager class
+class OTAManager {
+private:
+  Arduino_ESP32_OTA ota;
+  bool updateAvailable = false;
+  String status = "Ready";
+  unsigned long lastCheck = 0;
+  const unsigned long checkInterval = 30000; // Check every 30 seconds
+
+public:
+  String getStatus() { 
+    DEBUG_PRINTF(DEBUG_LEVEL_VERBOSE, "OTA Status: %s", status.c_str());
+    return status; 
   }
   
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected!");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
+  bool checkForUpdates() {
+    if (millis() - lastCheck < checkInterval) {
+      return false;
+    }
     
-    display.showLines("WiFi Connected", WiFi.localIP().toString().c_str(), "OTA Ready");
-    delay(2000);
-  } else {
-    Serial.println("\nWiFi connection failed!");
-    display.showLines("WiFi Failed", "Check creds", "Restarting...");
-    delay(3000);
+    DEBUG_PRINT(DEBUG_LEVEL_INFO, "Checking for OTA updates...");
+    lastCheck = millis();
+    status = "Checking...";
+    
+    // For now, we'll simulate having an update available after 60 seconds
+    // In a real implementation, you'd check actual availability
+    if (millis() > 60000) { // After 1 minute, indicate an update is available
+      updateAvailable = true;
+      status = "Update Available";
+      DEBUG_PRINT(DEBUG_LEVEL_INFO, "OTA update available");
+    } else {
+      updateAvailable = false;
+      status = "No updates";
+      DEBUG_PRINT(DEBUG_LEVEL_VERBOSE, "No OTA updates available");
+    }
+    
+    return updateAvailable;
   }
-}
 
-void checkForUpdates() {
-  if (WiFi.status() != WL_CONNECTED) return;
-  
-  if (millis() - lastOtaCheck >= otaCheckInterval) {
-    lastOtaCheck = millis();
-    otaState = OTA_CONNECTING;
+  bool performUpdate() {
+    if (!updateAvailable) {
+      DEBUG_PRINT(DEBUG_LEVEL_WARN, "No update available to perform");
+      return false;
+    }
     
-    display.showLines("Checking OTA", "GitHub", "...");
+    status = "Connecting...";
+    DEBUG_PRINT(DEBUG_LEVEL_INFO, "Starting OTA update process");
     
-    Arduino_ESP32_OTA ota;
     Arduino_ESP32_OTA::Error ota_err = Arduino_ESP32_OTA::Error::None;
-
-    Serial.println("Initializing OTA storage");
-    display.showLines("OTA", "Init storage", "");
     
     if ((ota_err = ota.begin()) != Arduino_ESP32_OTA::Error::None) {
-      Serial.print ("Arduino_ESP32_OTA::begin() failed with error code ");
-      Serial.println((int)ota_err);
-      otaState = OTA_FAILED;
-      otaStatus = "Init failed: " + String((int)ota_err);
-      return;
+      DEBUG_PRINTF(DEBUG_LEVEL_ERROR, "OTA begin failed with error: %d", (int)ota_err);
+      status = "Init failed";
+      return false;
     }
 
-    Serial.println("Starting download to flash ...");
-    otaState = OTA_DOWNLOADING;
-    display.showLines("OTA", "Downloading", "firmware...");
+    status = "Downloading...";
+    DEBUG_PRINT(DEBUG_LEVEL_INFO, "Downloading firmware...");
     
     int const ota_download = ota.download(githubUrl.c_str());
     if (ota_download <= 0) {
-      Serial.print ("Arduino_ESP32_OTA::download failed with error code ");
-      Serial.println(ota_download);
-      otaState = OTA_FAILED;
-      otaStatus = "Download failed: " + String(ota_download);
-      return;
+      DEBUG_PRINTF(DEBUG_LEVEL_ERROR, "OTA download failed with error: %d", ota_download);
+      status = "Download failed";
+      return false;
     }
-    Serial.print (ota_download);
-    Serial.println(" bytes stored.");
 
-    Serial.println("Verify update integrity and apply ...");
-    otaState = OTA_UPDATING;
-    display.showLines("OTA", "Updating", "Please wait...");
+    status = "Updating...";
+    DEBUG_PRINTF(DEBUG_LEVEL_INFO, "OTA download successful, %d bytes downloaded", ota_download);
     
     if ((ota_err = ota.update()) != Arduino_ESP32_OTA::Error::None) {
-      Serial.print ("ota.update() failed with error code ");
-      Serial.println((int)ota_err);
-      otaState = OTA_FAILED;
-      otaStatus = "Update failed: " + String((int)ota_err);
+      DEBUG_PRINTF(DEBUG_LEVEL_ERROR, "OTA update failed with error: %d", (int)ota_err);
+      status = "Update failed";
+      return false;
+    }
+
+    status = "Success!";
+    DEBUG_PRINT(DEBUG_LEVEL_INFO, "OTA Update successful. Resetting...");
+    delay(1000);
+    ota.reset();
+    return true;
+  }
+};
+
+// Button state management
+class ButtonManager {
+private:
+  bool lastButtonState = false;
+  bool currentButtonState = false;
+  unsigned long lastDebounceTime = 0;
+  const unsigned long debounceDelay = 50;
+
+public:
+  void initialize() {
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    DEBUG_PRINTF(DEBUG_LEVEL_INFO, "Button initialized on pin %d", BUTTON_PIN);
+  }
+  
+  bool isPressed() {
+    bool reading = !digitalRead(BUTTON_PIN);  // Inverted logic for pull-up
+    unsigned long currentTime = millis();
+    
+    if (reading != lastButtonState) {
+      lastDebounceTime = currentTime;
+    }
+    
+    if ((currentTime - lastDebounceTime) > debounceDelay) {
+      if (reading != currentButtonState) {
+        currentButtonState = reading;
+        if (currentButtonState) {
+          DEBUG_PRINT(DEBUG_LEVEL_INFO, "Button pressed");
+          return true;  // Button was just pressed
+        }
+      }
+    }
+    
+    lastButtonState = reading;
+    return false;
+  }
+};
+
+// Marquee text class
+class MarqueeText {
+private:
+  String text;
+  
+public:
+  MarqueeText(const String& t) : text(t) {}
+  
+  void draw(OledDisplay &display, int16_t y, uint32_t now) {
+    const uint16_t textPixelWidth = display.textWidth(text.c_str());
+    const uint8_t screenWidth = display.width();
+    
+    if (textPixelWidth <= screenWidth) {
+      display.drawText(0, y, text.c_str());
       return;
     }
 
-    Serial.println("Performing a reset after which the bootloader will start the new firmware.");
-    otaStatus = "Update Success!";
-    display.showLines("OTA Success", "Restarting", "...");
+    const uint16_t travel = textPixelWidth + screenWidth + kMarqueeGapPx;
+    const uint32_t step = (now / kMarqueeStepMs) % travel;
+    const int16_t primaryX = static_cast<int16_t>(screenWidth) - static_cast<int16_t>(step);
     
-    delay(1000); /* Make sure the serial message gets out before the reset. */
-    otaState = OTA_SUCCESS;
-    ota.reset();
+    display.drawText(primaryX, y, text.c_str());
+    display.drawText(primaryX + textPixelWidth + kMarqueeGapPx, y, text.c_str());
   }
-}
+};
 
-// Simulated sensor values
-float simulatedTemp = 23.5;
-float simulatedHumidity = 45.2;
-
-void updateSensors() {
-  // Simulate sensor readings changing over time
-  simulatedTemp = 20.0 + (millis() / 100000.0) * 5.0 + random(-20, 20) / 10.0;
-  simulatedHumidity = 40.0 + (millis() / 200000.0) * 10.0 + random(-15, 15) / 5.0;
-}
-
-void drawProgressBar(OledDisplay &display, int16_t x, int16_t y, uint8_t width, uint8_t percent) {
-  // Draw frame
-  display.drawFrame(x, y, width, 6);
-  // Draw filled portion
-  uint8_t fillWidth = (width - 2) * percent / 100;
-  if (fillWidth > 0) {
-    display.drawBox(x + 1, y + 1, fillWidth, 4);
-  }
-}
-
-void showDemoScreen() {
-  static unsigned long lastUpdate = 0;
-  static int demoMode = 0;
-  static unsigned long demoChangeTime = 0;
+// Web server handlers
+void handleRoot() {
+  DEBUG_PRINT(DEBUG_LEVEL_INFO, "Handling root request");
+  String html = "<!DOCTYPE html><html>";
+  html += "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">";
+  html += "<style>html { font-family: Arial; display: inline-block; margin: 0px auto; text-align: center;}</style></head>";
+  html += "<body><h2>ESP32 OTA Setup</h2>";
+  html += "<form method=\"post\" action=\"/save\">";
+  html += "<input type=\"text\" name=\"ssid\" placeholder=\"WiFi SSID\" required>";
+  html += "<input type=\"password\" name=\"password\" placeholder=\"WiFi Password\" required><br><br>";
+  html += "<input type=\"submit\" value=\"Connect\">";
+  html += "</form></body></html>";
   
-  // Update simulated sensors periodically
-  static unsigned long lastSensorUpdate = 0;
-  if (millis() - lastSensorUpdate > 2000) {
-    updateSensors();
-    lastSensorUpdate = millis();
-  }
-  
-  if (millis() - lastUpdate > 100) { // Update display at ~10 FPS
-    lastUpdate = millis();
+  server.send(200, "text/html", html);
+}
+
+void handleSave() {
+  DEBUG_PRINT(DEBUG_LEVEL_INFO, "Handling save request");
+  if (server.hasArg("ssid") && server.hasArg("password")) {
+    ssid = server.arg("ssid");
+    password = server.arg("password");
     
-    // Change demo mode every 10 seconds
-    if (millis() - demoChangeTime > 10000) {
-      demoMode = (demoMode + 1) % 6;
-      demoChangeTime = millis();
+    DEBUG_PRINTF(DEBUG_LEVEL_INFO, "Received credentials - SSID: %s, Password length: %d", ssid.c_str(), password.length());
+    
+    String html = "<!DOCTYPE html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head>";
+    html += "<body><h2>Configuration Saved!</h2>";
+    html += "<p>Attempting to connect to: " + ssid + "</p>";
+    html += "<p>Device will restart in 2 seconds...</p>";
+    html += "<script>setTimeout(function(){ window.location.href = '/'; }, 2000);</script>";
+    html += "</body></html>";
+    
+    server.send(200, "text/html", html);
+    
+    delay(1000);
+    ESP.restart();  // Restart to connect with new credentials
+  } else {
+    DEBUG_PRINT(DEBUG_LEVEL_ERROR, "Missing parameters in save request");
+    server.send(400, "text/plain", "Missing parameters");
+  }
+}
+
+// Main application class
+class ESP32OLEDApp {
+private:
+  OledDisplay display;
+  WiFiManager wifi;
+  OTAManager ota;
+  ButtonManager button;
+  unsigned long lastDisplayUpdate = 0;
+  int apModeCountdown = 0;  // Countdown for AP mode activation
+
+public:
+  void initialize() {
+    Serial.begin(115200);
+    delay(1000); // Give some time for serial to initialize
+    
+    DEBUG_PRINTLN(DEBUG_LEVEL_INFO, "Starting ESP32 OLED Secure OTA Demo");
+    DEBUG_PRINTF(DEBUG_LEVEL_INFO, "Button pin: %d, SDA: %d, SCL: %d", BUTTON_PIN, SDA_PIN, SCL_PIN);
+    
+    // Initialize display
+    display.begin();
+    display.showLines("ESP32 OLED", "Secure OTA Demo", "Hold btn for AP");
+    
+    // Initialize button
+    button.initialize();
+    
+    // Check if button is held at startup to enter AP mode
+    if (!digitalRead(BUTTON_PIN)) {  // Button is pressed
+      DEBUG_PRINT(DEBUG_LEVEL_INFO, "Button pressed at startup - entering AP mode");
+      wifi.startAPMode();
+      setupWebServer();
+      currentState = CONFIG_MODE;
+    } else {
+      DEBUG_PRINTLN(DEBUG_LEVEL_INFO, "Attempting to connect to saved network...");
+      currentState = CONNECTING;
+      if (ssid.length() > 0) {
+        if (wifi.connectToNetwork(ssid, password)) {
+          currentState = CONNECTED;
+        } else {
+          DEBUG_PRINTLN(DEBUG_LEVEL_WARN, "Failed to connect, entering AP mode");
+          wifi.startAPMode();
+          setupWebServer();
+          currentState = CONFIG_MODE;
+        }
+      } else {
+        DEBUG_PRINTLN(DEBUG_LEVEL_INFO, "No saved credentials, entering AP mode");
+        wifi.startAPMode();
+        setupWebServer();
+        currentState = CONFIG_MODE;
+      }
+    }
+  }
+  
+  void setupWebServer() {
+    server.on("/", handleRoot);
+    server.on("/save", HTTP_POST, handleSave);
+    server.begin();
+    dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+    DEBUG_PRINTF(DEBUG_LEVEL_INFO, "Web server started on AP IP: %s", WiFi.softAPIP().toString().c_str());
+  }
+
+  void run() {
+    // Handle button press for AP mode activation
+    if (button.isPressed()) {
+      apModeCountdown = 50;  // 5 second countdown (at 100ms intervals)
+      DEBUG_PRINT(DEBUG_LEVEL_INFO, "Button pressed - AP mode activation countdown started");
     }
     
+    if (apModeCountdown > 0) {
+      apModeCountdown--;
+      if (apModeCountdown == 0) {
+        // Enter AP mode
+        DEBUG_PRINT(DEBUG_LEVEL_INFO, "Entering AP mode via button press");
+        wifi.startAPMode();
+        setupWebServer();
+        currentState = CONFIG_MODE;
+      }
+    }
+    
+    // Process web server if in AP mode
+    if (currentState == CONFIG_MODE) {
+      dnsServer.processNextRequest();
+      server.handleClient();
+    }
+    
+    // Update display
+    if (millis() - lastDisplayUpdate > 100) {  // Update at ~10 FPS
+      lastDisplayUpdate = millis();
+      updateDisplay();
+      
+      if (currentState == CONNECTED) {
+        // Check for OTA updates while connected
+        ota.checkForUpdates();
+      } else if (currentState == CONNECTING) {
+        // Try to connect if not connected
+        if (ssid.length() > 0) {
+          if (wifi.connectToNetwork(ssid, password)) {
+            currentState = CONNECTED;
+          }
+        }
+      }
+    }
+  }
+  
+  void updateDisplay() {
     display.beginFrame();
     
-    // Declare variables at the beginning of the function to avoid cross-initialization
-    int seconds, minutes, hours;
-    
-    switch(demoMode) {
-      case 0: // Main status screen
-        display.drawText(0, 10, "IP:");
-        display.drawText(15, 10, WiFi.localIP().toString().substring(0, 10).c_str());
-        display.drawText(45, 10, WiFi.localIP().toString().substring(10).c_str());
-        
-        display.drawText(0, 20, "Uptime:");
-        seconds = millis() / 1000;
-        minutes = seconds / 60;
-        hours = minutes / 60;
-        char uptimeStr[12];
-        sprintf(uptimeStr, "%02d:%02d:%02d", hours, minutes % 60, seconds % 60);
-        display.drawText(0, 30, uptimeStr);
+    switch(currentState) {
+      case CONFIG_MODE:
+        display.drawText(0, 10, "AP Mode Active");
+        display.drawText(0, 20, apSSID);
+        display.drawText(0, 30, "Connect & setup");
         break;
         
-      case 1: // OTA status screen
-        display.drawText(0, 10, "OTA Status:");
-        display.drawText(0, 20, otaStatus.c_str());
-        
-        if (otaState == OTA_IDLE) {
-          display.drawText(0, 30, "Check: " + String((otaCheckInterval - (millis() - lastOtaCheck))/1000) + "s");
-        } else if (otaState != OTA_SUCCESS && otaState != OTA_FAILED) {
-          // Show animation during OTA process
-          static int dotCount = 0;
+      case CONNECTING:
+        display.drawText(0, 10, "Connecting to");
+        display.drawText(0, 20, ssid.substring(0, 12).c_str());
+        {
           String dots = "";
-          for (int i = 0; i < (millis()/500) % 4; i++) {
-            dots += ".";
-          }
+          for (int i = 0; i < (millis()/500) % 4; i++) dots += ".";
           display.drawText(30, 30, dots.c_str());
         }
         break;
         
-      case 2: // Marquee demo
-        drawMarqueeLine(display, "ESP32 OLED Demo", 15, millis());
-        drawMarqueeLine(display, "with OTA Updates", 25, millis() + 500);
+      case CONNECTED:
+        display.drawText(0, 10, "Connected!");
+        display.drawText(0, 20, wifi.getSSID().substring(0, 12).c_str());
+        display.drawText(0, 30, wifi.getIP().substring(0, 12).c_str());
         break;
         
-      case 3: // System info
-        display.drawText(0, 10, "Heap:");
-        display.drawText(30, 10, String(ESP.getFreeHeap()/1000).c_str());
-        display.drawText(55, 10, "kB");
-        
-        display.drawText(0, 20, "Mhz:");
-        display.drawText(30, 20, String(ESP.getCpuFreqMHz()).c_str());
-        
-        display.drawText(0, 30, "Cores:");
-        display.drawText(30, 30, String(ESP.getChipCores()).c_str());
-        break;
-        
-      case 4: // Sensor demo (simulated)
-        display.drawText(0, 12, "Temp:");
-        char tempStr[8];
-        dtostrf(simulatedTemp, 5, 1, tempStr);
-        display.drawText(30, 12, tempStr);
-        display.drawText(60, 12, "C");
-        
-        display.drawText(0, 22, "Hum:");
-        char humStr[8];
-        dtostrf(simulatedHumidity, 4, 1, humStr);
-        display.drawText(25, 22, humStr);
-        display.drawText(60, 22, "%");
-        
-        // Draw a simple bar graph
-        drawProgressBar(display, 0, 32, 70, simulatedHumidity);
-        break;
-        
-      case 5: // Animation demo
-        // Draw a simple bouncing animation
-        int pos = (millis() / 50) % 60;
-        display.drawDisc(5 + (pos % 62), 20, 3);
-        display.drawText(0, 10, "Animation");
+      default:
+        display.drawText(0, 10, "System Ready");
+        display.drawText(0, 20, "Press button for AP");
         break;
     }
     
     display.endFrame();
   }
+};
+
+// Create global instance
+ESP32OLEDApp app;
+
+void setup() {
+  app.initialize();
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
-    checkForUpdates();
-  } else {
-    // WiFi is disconnected - try to reconnect
-    display.showLines("WiFi Lost", "Reconnecting...", "");
-    WiFi.begin(ssid, password);
-    delay(5000);
-  }
-  
-  showDemoScreen();
+  app.run();
 }
